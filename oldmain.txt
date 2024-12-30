@@ -1,0 +1,311 @@
+package main
+
+import (
+	"container/heap"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"math/rand"
+	"net/http"
+
+	//"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+const (
+	port               = 9000
+	sessionTimeoutMins = 1
+	maxHighStakes      = 3
+	sessionKeyLength   = 20
+)
+
+// Session 结构体
+type Session struct {
+	SessionKey string    `json:"session_key"`
+	ExpiryTime time.Time `json:"expiry_time"`
+}
+
+func (s *Session) isExpired() bool {
+	return time.Now().After(s.ExpiryTime)
+}
+
+// 高赌注项
+type StakeItem struct {
+	CustomerID string `json:"customer_id"`
+	Stake      int    `json:"stake"`
+}
+
+type StakeList []StakeItem
+
+func (h StakeList) Len() int           { return len(h) }
+func (h StakeList) Less(i, j int) bool { return h[i].Stake > h[j].Stake }
+func (h StakeList) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+
+func (h *StakeList) Push(x interface{}) {
+	*h = append(*h, x.(StakeItem))
+}
+
+func (h *StakeList) Pop() interface{} {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[0 : n-1]
+	return x
+}
+
+type App struct {
+	sessions sync.Map // customerId -> session
+	stakes   sync.Map // betOfferId -> map[string]int
+	mu       sync.RWMutex
+}
+
+func NewApp() *App {
+	return &App{
+		sessions: sync.Map{},
+		stakes:   sync.Map{},
+	}
+}
+func main() {
+	app := NewApp()
+
+	// 启动会话清理任务
+	go app.sessionCleanup()
+
+	http.HandleFunc("/", app.handler)
+
+	log.Printf("Server starting on port: %d\n", port)
+
+	server := &http.Server{
+		Addr:              fmt.Sprintf(":%d", port),
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      10 * time.Second,
+	}
+
+	if err := server.ListenAndServe(); err != nil {
+		log.Fatalf("Could not start server: %v\n", err)
+	}
+
+}
+
+func (app *App) handler(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Path
+	method := r.Method
+
+	pathParts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(pathParts) < 2 {
+		app.sendErrorResponse(w, http.StatusNotFound, "Not Found")
+		return
+	}
+
+	switch {
+	case len(pathParts) == 2 && method == http.MethodGet && strings.HasSuffix(path, "/session"):
+		app.handleGetSession(w, r, pathParts[0])
+	case len(pathParts) == 2 && method == http.MethodGet && strings.HasSuffix(path, "/highstakes"):
+		app.handleGetHighStakes(w, r, pathParts[0])
+	case len(pathParts) == 2 && method == http.MethodPost && strings.HasSuffix(path, "/stake"):
+		app.handlePostStake(w, r, pathParts[0])
+	default:
+		app.sendErrorResponse(w, http.StatusNotFound, "Not Found")
+	}
+}
+
+// 处理 GET /<customerid>/session
+func (app *App) handleGetSession(w http.ResponseWriter, r *http.Request, customerID string) {
+	session, ok := app.sessions.Load(customerID)
+	if ok {
+		s := session.(*Session)
+		if !s.isExpired() {
+			app.sendJSONResponse(w, http.StatusOK, s.SessionKey)
+			return
+		}
+	}
+
+	newSession := &Session{
+		SessionKey: app.generateSessionKey(),
+		ExpiryTime: time.Now().Add(time.Duration(sessionTimeoutMins) * time.Minute),
+	}
+
+	app.sessions.Store(customerID, newSession)
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(newSession.SessionKey))
+	//app.sendJSONResponse(w, http.StatusOK, newSession)
+	// app.sendJSONResponse(w, http.StatusOK, app.generateSessionKey())
+}
+
+type PostStakeRequest struct {
+	Stake int `json:"stake"`
+}
+
+// 处理 POST /<betofferid>/stake?sessionkey=<sessionkey>
+func (app *App) handlePostStake(w http.ResponseWriter, r *http.Request, betOfferID string) {
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	sessionKey := r.URL.Query().Get("session")
+	if sessionKey == "" {
+		app.sendErrorResponse(w, http.StatusUnauthorized, "Session key required")
+		return
+	}
+
+	customerID := app.getCustomerIdFromSessionKey(sessionKey)
+	if customerID == "" {
+		app.sendErrorResponse(w, http.StatusUnauthorized, "Invalid session key")
+		return
+	}
+
+	var stakeRequest PostStakeRequest
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		app.sendErrorResponse(w, http.StatusBadRequest, "Invalid input body")
+		return
+	}
+
+	if err := json.Unmarshal(body, &stakeRequest); err != nil {
+		app.sendErrorResponse(w, http.StatusBadRequest, "Invalid JSON format")
+		return
+	}
+
+	stake := stakeRequest.Stake
+
+	stakesMap, ok := app.stakes.Load(betOfferID)
+	if !ok {
+		stakesMap = sync.Map{}
+	}
+	sm := stakesMap.(sync.Map)
+	currentStakeValue, ok := sm.Load(customerID)
+	if ok {
+		currentStake := currentStakeValue.(int)
+		if stake > currentStake {
+			sm.Store(customerID, stake) // 如果当前 stake 更大，则更新
+		}
+	} else {
+		sm.Store(customerID, stake) // 如果不存在，则创建
+	}
+
+	//sm.Store(customerID, stake)
+	app.stakes.Store(betOfferID, sm)
+
+	// app.sendJSONResponse(w, http.StatusNoContent, nil)
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusOK)
+}
+
+// 处理 GET /<betofferid>/highstakes
+func (app *App) handleGetHighStakes(w http.ResponseWriter, r *http.Request, betOfferID string) {
+	app.mu.RLock() // 获取读锁
+	defer app.mu.RUnlock()
+	stakesMap, ok := app.stakes.Load(betOfferID)
+	if !ok {
+		app.sendJSONResponse(w, http.StatusOK, []StakeItem{})
+		return
+	}
+	sm := stakesMap.(sync.Map)
+	pq := &StakeList{}
+	heap.Init(pq)
+	seenCustomers := make(map[string]bool)
+
+	sm.Range(func(key, value interface{}) bool {
+		customerID := key.(string)
+		stake := value.(int)
+		if !seenCustomers[customerID] {
+			heap.Push(pq, StakeItem{CustomerID: customerID, Stake: stake})
+			seenCustomers[customerID] = true
+		}
+		return true
+	})
+	sm.Range(func(key, value interface{}) bool {
+		sm.Delete(key)
+		return true
+	})
+
+	// var topStakes []StakeItem
+	// for pq.Len() > 0 && len(topStakes) < maxHighStakes {
+	// 	item := heap.Pop(pq).(StakeItem)
+	// 	topStakes = append(topStakes, item)
+	// 	sm.Store(item.CustomerID, item.Stake)
+	// }
+	var topStakes []string
+	for pq.Len() > 0 && len(topStakes) < maxHighStakes {
+		item := heap.Pop(pq).(StakeItem)
+		topStakes = append(topStakes, fmt.Sprintf("%s=%d", item.CustomerID, item.Stake)) // 直接添加到 []string
+		sm.Store(item.CustomerID, item.Stake)                                            // 将数据存储到 map
+
+	}
+	// app.sendJSONResponse(w, http.StatusOK, topStakes)
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(strings.Join(topStakes, ",")))
+}
+
+func (app *App) sendResponse(w http.ResponseWriter, statusCode int, body string) {
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(statusCode)
+	w.Write([]byte(body))
+}
+
+type ErrorResponse struct {
+	Message string `json:"message"`
+}
+
+func (app *App) sendErrorResponse(w http.ResponseWriter, statusCode int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(ErrorResponse{Message: message})
+
+}
+
+func (app *App) sendJSONResponse(w http.ResponseWriter, statusCode int, body interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	// log.Printf(body)
+	if body != nil {
+		json.NewEncoder(w).Encode(body)
+	}
+}
+
+func (app *App) generateSessionKey() string {
+	rand.Seed(time.Now().UnixNano())
+	b := make([]byte, sessionKeyLength)
+	for i := range b {
+		const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
+		b[i] = chars[rand.Intn(len(chars))]
+	}
+	return string(b)
+}
+
+func (app *App) sessionCleanup() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		app.sessions.Range(func(key, value interface{}) bool {
+			session := value.(*Session)
+			if session.isExpired() {
+				app.sessions.Delete(key)
+				log.Printf("Deleted session for customer: %v\n", key)
+			}
+			return true
+		})
+	}
+}
+
+func (app *App) getCustomerIdFromSessionKey(sessionKey string) string {
+	var customerId string
+	app.sessions.Range(func(key, value interface{}) bool {
+		session := value.(*Session)
+		log.Printf("Checking session key: %s, stored session key: %s, customerID: %v\n", sessionKey, session.SessionKey, key) // 添加日志
+		if session.SessionKey == sessionKey {
+			customerId = key.(string)
+			log.Printf("Found customer id: %v for session key: %v\n", customerId, sessionKey)
+			return false // 找到了匹配项，停止遍历
+		}
+		return true // 继续遍历
+	})
+	if customerId == "" {
+		log.Printf("Could not find a customer id for session key: %v\n", sessionKey)
+	}
+	return customerId
+}
