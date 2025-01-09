@@ -1,4 +1,4 @@
-package dataType
+package stake
 
 import (
 	"fmt"
@@ -35,7 +35,8 @@ func (list *DoublyLinkedList) Insert(id int, value int) {
 	newNode := &Node{ID: id, Value: value}
 	// 查找是否已经存在相同的ID
 	existingNode := list.findNodeById(id)
-	log.Printf("%d=%d,add at link", newNode.ID, newNode.Value)
+	log.Printf("%d=%d ,add at link", newNode.ID, newNode.Value)
+
 	if existingNode != nil {
 		if value > existingNode.Value { // 如果新值更大，则更新
 			list.removeNode(existingNode) // 删除旧节点
@@ -44,7 +45,9 @@ func (list *DoublyLinkedList) Insert(id int, value int) {
 		return
 	}
 	list.insertNewNode(newNode)
-
+	if newNode.Next != nil {
+		log.Printf(" next:%d", newNode.Next.ID)
+	}
 }
 
 func (list *DoublyLinkedList) insertNewNode(newNode *Node) {
@@ -130,11 +133,13 @@ func (list *DoublyLinkedList) findNodeById(id int) *Node {
 	return nil
 }
 
-func (list *DoublyLinkedList) GetTop(n int) []string {
+func (list *DoublyLinkedList) Getlinklist(n int) []string {
 	list.mu.RLock()
 	defer list.mu.RUnlock()
 	var result []string
 	current := list.Head
+	log.Printf(" get linklist")
+
 	for current != nil && len(result) < n {
 		result = append(result, fmt.Sprintf("%d=%d", current.ID, current.Value))
 		current = current.Next
