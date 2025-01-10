@@ -19,7 +19,6 @@ const (
 type App struct {
 	SessionManager *session.SessionManager
 	StakeMap       *stake.StakeMap
-	// dataStructure sync.Map // betOfferId -> datastructure
 }
 
 func NewApp() *App {
@@ -57,9 +56,8 @@ func (app *App) handleGetSession(w http.ResponseWriter, r *http.Request, custome
 		app.sendResponse(w, http.StatusBadRequest, "need input number")
 		return
 	}
-	log.Printf("handle get session")
 	session := app.SessionManager.GetSession(ID)
-	log.Printf(" get success")
+	log.Printf(" get session  success in handle")
 
 	app.sendResponse(w, http.StatusOK, session.SessionKey)
 }

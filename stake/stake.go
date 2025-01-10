@@ -18,7 +18,7 @@ func NewstakeMap() *StakeMap {
 func (sm *StakeMap) Insert(custmerID int, betOfferID int, value int, maxHighStakes int) {
 
 	oldlist, ok := sm.StakeMap.Load(betOfferID) // 使用Load获取，如果不存在则创建
-	log.Printf("in post")
+	log.Printf("in stake run post func")
 	if !ok {
 		list := NewDoublyLinkedList(maxHighStakes)
 		list.Insert(custmerID, value)
@@ -35,10 +35,6 @@ func (sm *StakeMap) Insert(custmerID int, betOfferID int, value int, maxHighStak
 }
 func (sm *StakeMap) GetTop(betOfferID int, maxHighStakes int) ([]string, bool) {
 
-	// stakeMapValue2, ok := sm.StakeMap.Load(9)
-	// if !ok {
-	// 	log.Printf(" failure")
-	// }
 	log.Printf(" betid is %d", betOfferID)
 
 	stakeMapValue, ok := sm.StakeMap.Load(betOfferID)

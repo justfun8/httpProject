@@ -20,29 +20,29 @@ func (s *Session) IsExpired() bool {
 }
 
 type SessionManager struct {
-	sessionsByCustomerID sync.Map // customerId -> *Session
-	sessionsBySessionKey sync.Map // sessionKey -> string
+	SessionsByCustomerID sync.Map // customerId -> *Session
+	SessionsBySessionKey sync.Map // sessionKey -> string
 	mu                   sync.RWMutex
 }
 
 func NewSessionManager() *SessionManager {
 	return &SessionManager{
-		sessionsByCustomerID: sync.Map{},
-		sessionsBySessionKey: sync.Map{},
+		SessionsByCustomerID: sync.Map{},
+		SessionsBySessionKey: sync.Map{},
 	}
 }
 func (m *SessionManager) GetSession(customerID int) *Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	sessionValue, ok := m.sessionsByCustomerID.Load(customerID)
-	log.Printf(" get session %t", ok)
+	sessionValue, ok := m.SessionsByCustomerID.Load(customerID)
+	log.Printf(" get session  %t in sessionmap,", ok)
 	if ok {
 		session := sessionValue.(*Session)
 		if session.IsExpired() {
 			log.Printf(" expire")
 
-			m.sessionsByCustomerID.Delete(customerID)
-			m.sessionsBySessionKey.Delete(session.SessionKey)
+			m.SessionsByCustomerID.Delete(customerID)
+			m.SessionsBySessionKey.Delete(session.SessionKey)
 		} else {
 			log.Printf(" not expire")
 
@@ -62,31 +62,55 @@ func (m *SessionManager) GetSession(customerID int) *Session {
 }
 
 func (m *SessionManager) storeSession(customerID int, session *Session) {
-	m.sessionsByCustomerID.Store(customerID, session)
-	m.sessionsBySessionKey.Store(session.SessionKey, customerID)
+	m.SessionsByCustomerID.Store(customerID, session)
+	m.SessionsBySessionKey.Store(session.SessionKey, customerID)
+
 }
 
 func (m *SessionManager) GetCustomerID(sessionKey string) (int, bool) {
-	customerIDValue, ok := m.sessionsBySessionKey.Load(sessionKey)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	customerIDValue, ok := m.SessionsBySessionKey.Load(sessionKey)
 	if !ok {
 		return -1, false
 	}
+	sessionValue, ok := m.SessionsByCustomerID.Load(customerIDValue)
+	if ok {
+		session := sessionValue.(*Session)
+		if session.IsExpired() {
+			log.Printf(" this session key is expire")
+			return -1, false
+		}
+
+	}
+
 	return customerIDValue.(int), true
 }
 
 func (m *SessionManager) SessionCleanup() {
+	log.Printf("Session cleanup started.")
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
-	m.sessionsByCustomerID.Range(func(key, value interface{}) bool {
-		session := value.(*Session)
-		if session.IsExpired() {
-			m.sessionsByCustomerID.Delete(key)
-			m.sessionsBySessionKey.Delete(session.SessionKey)
-			log.Printf("Deleted session for customer: %v\n", key)
-		}
-		return true
-	})
+	for {
+		log.Printf("Waiting for next tick...")
+		<-ticker.C
+		log.Printf("session clean here")
+
+		// Session cleanup logic
+		m.SessionsByCustomerID.Range(func(key, value interface{}) bool {
+			log.Printf("session clean here start range %d", key)
+
+			session := value.(*Session)
+			if session.IsExpired() {
+				m.SessionsByCustomerID.Delete(key)
+				m.SessionsBySessionKey.Delete(session.SessionKey)
+				log.Printf("Deleted session for customer: %v\n", key)
+			}
+			return true
+		})
+	}
 }
 
 func (m *SessionManager) generateSessionKey() string {

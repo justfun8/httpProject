@@ -12,8 +12,6 @@ const port = 9000
 func main() {
 	app := handle.NewApp()
 	go app.SessionManager.SessionCleanup()
-	// go app.SessionManager.SessionCleanup()
-
 	log.Printf("Server starting on port: %d\n", port)
 
 	server := &http.Server{
